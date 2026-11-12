@@ -4,7 +4,18 @@
 
 `ForcepointAgentCoverage.en.ps1` compares the enabled users in Active Directory with the users in the Forcepoint Security Manager (FSM) **Status > Endpoint Status** list. It finds and reports **users that do not appear to have a Forcepoint agent installed**.
 
-> **Read-only.** Nothing is deleted or changed in the SQL database or in Active Directory. Use the separate **ForcepointAgentCleanup** script to delete stale Endpoint Status records.
+> **Read-only.** Nothing is deleted or changed in the SQL database or in Active Directory. Use the separate [ForcepointAgentCleanup](https://github.com/fiirataydiin/forcepoint-dlp-endpoint-cleanup) script to delete stale Endpoint Status records.
+
+## Files
+
+| File | Description |
+|---|---|
+| `ForcepointAgentCoverage.ps1` | Console report + CSV (Turkish) |
+| `ForcepointAgentCoverage.en.ps1` | Console report + CSV (English) |
+| `ForcepointAgentCoverageHtml.ps1` | Console report + CSV + **HTML report** (Turkish) |
+| `ForcepointAgentCoverageHtml.en.ps1` | Console report + CSV + **HTML report** (English) |
+
+The HTML scripts do the same as the coverage scripts and additionally create an HTML report. See the [HTML report](#html-report) section for details.
 
 ## What it does
 
@@ -79,6 +90,36 @@ The query uses .NET `System.DirectoryServices` (LDAP); no RSAT / ActiveDirectory
 
 `ForcepointAgentCoverage.ps1` is the same script with Turkish screen text. Both scripts have the same parameters and logic.
 
+## HTML report
+
+In addition to the console report and the CSV, `ForcepointAgentCoverageHtml.en.ps1` creates a **single-file HTML report** and opens it in the default browser. The report is saved next to the CSV as `Forcepoint_Agent_Coverage_<date>.html`.
+
+- **Single file, no internet needed.** CSS and JavaScript are embedded; there are no external links. It works on an FSM server without internet access and can be sent by e-mail.
+- **Coverage ring:** the share of users with an agent, e.g. "71.4% · 10 / 14".
+- **Summary cards:** users without an agent, users with an agent, users not seen for 30+ days, shared machines, and users not found in AD.
+- **Endpoint Status summary:** total agents and agents not reporting for 7 / 15 / 30+ days.
+- **Tables:** every section has a search box, and clicking a column header sorts the table.
+- **Colored day labels:** threshold and above in red, 7+ days in amber, below in green.
+- **Light / dark theme:** chosen automatically from the computer's theme setting. It also looks right on phones and when printed.
+- All data is written to the HTML safely (encoded).
+
+```powershell
+.\ForcepointAgentCoverageHtml.en.ps1
+```
+
+```powershell
+.\ForcepointAgentCoverageHtml.en.ps1 -OutputFolder "D:\Reports" -NoOpen
+```
+
+In addition to all the parameters above, the HTML script supports:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `-OutputFolder` | desktop | Folder for the CSV and HTML report |
+| `-NoOpen` | off | Does not open the HTML report in the browser after creating it (for scheduled tasks) |
+
+`ForcepointAgentCoverageHtml.ps1` creates the same report in Turkish.
+
 ### Requirements
 
 - Windows PowerShell 5.1+
@@ -90,7 +131,7 @@ The query uses .NET `System.DirectoryServices` (LDAP); no RSAT / ActiveDirectory
 
 - Transfer the script **as a file** (preferably in a zip), not by copying and pasting its content. If a line is added to the top of the file while copying, you get the `Unexpected attribute 'CmdletBinding'` error.
 - The files are saved as **UTF-8 with BOM**. If saved with a different encoding, Turkish characters are displayed incorrectly.
-- If a downloaded file is blocked: `Unblock-File .\ForcepointAgentCoverage.en.ps1`
+- If a downloaded file is blocked: `Unblock-File .\ForcepointAgentCoverage.en.ps1` (for the HTML script: `Unblock-File .\ForcepointAgentCoverageHtml.en.ps1`)
 
 ## Screenshots
 
@@ -115,6 +156,14 @@ The query uses .NET `System.DirectoryServices` (LDAP); no RSAT / ActiveDirectory
 ### 5. AD access error, retry with a different account and a different OU
 
 ![AD error and retry](docs/images/en/05-ad-error-and-retry.png)
+
+### 6. HTML report (light theme, full page)
+
+![HTML report light theme](docs/images/en/06-html-report-light-theme.png)
+
+### 7. HTML report (dark theme)
+
+![HTML report dark theme](docs/images/en/07-html-report-dark-theme.png)
 
 ---
 
