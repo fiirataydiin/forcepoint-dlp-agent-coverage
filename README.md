@@ -4,7 +4,18 @@
 
 `ForcepointAgentCoverage.ps1`, Active Directory'deki aktif kullanıcıları Forcepoint Security Manager (FSM) **Status > Endpoint Status** listesindeki kullanıcılarla karşılaştırır. Böylece **Forcepoint ajanı kurulu görünmeyen kullanıcıları** bulur ve raporlar.
 
-> **Yalnızca okuma yapar.** SQL veritabanında ve Active Directory'de hiçbir kayıt silinmez veya değiştirilmez. Eski Endpoint Status kayıtlarını silmek için ayrı **ForcepointAgentCleanup** scriptini kullanın.
+> **Yalnızca okuma yapar.** SQL veritabanında ve Active Directory'de hiçbir kayıt silinmez veya değiştirilmez. Eski Endpoint Status kayıtlarını silmek için ayrı [ForcepointAgentCleanup](https://github.com/fiirataydiin/forcepoint-dlp-endpoint-cleanup) scriptini kullanın.
+
+## Dosyalar
+
+| Dosya | Açıklama |
+|---|---|
+| `ForcepointAgentCoverage.ps1` | Konsol raporu + CSV (Türkçe) |
+| `ForcepointAgentCoverage.en.ps1` | Konsol raporu + CSV (İngilizce) |
+| `ForcepointAgentCoverageHtml.ps1` | Konsol raporu + CSV + **HTML rapor** (Türkçe) |
+| `ForcepointAgentCoverageHtml.en.ps1` | Konsol raporu + CSV + **HTML rapor** (İngilizce) |
+
+HTML scriptleri, coverage scriptleriyle aynı işi yapar ve ek olarak bir HTML rapor üretir. Ayrıntılar için [HTML rapor](#html-rapor) bölümüne bakın.
 
 ## Ne yapar?
 
@@ -79,6 +90,36 @@ Sorgu .NET `System.DirectoryServices` (LDAP) ile yapılır, RSAT / ActiveDirecto
 
 İngilizce ekran metinleri için `ForcepointAgentCoverage.en.ps1` kullanılabilir. İki scriptin parametreleri ve mantığı aynıdır.
 
+## HTML rapor
+
+`ForcepointAgentCoverageHtml.ps1`, konsol raporu ve CSV'ye ek olarak **tek dosyalık bir HTML rapor** üretir ve varsayılan tarayıcıda açar. Rapor CSV ile aynı klasöre `Forcepoint_Ajan_Kapsam_<tarih>.html` adıyla kaydedilir.
+
+- **Tek dosya, internet gerekmez.** CSS ve JavaScript dosyanın içindedir, dış bağlantı yoktur. İnternete çıkışı olmayan bir FSM sunucusunda da çalışır, e-postayla gönderilebilir.
+- **Kapsam halkası:** ajanı olan kullanıcıların oranı, örneğin "%71,4 · 10 / 14".
+- **Özet kartları:** ajanı olmayan, ajanı olan, 30+ gündür görülmeyen, ortak makine ve AD'de bulunamayan kullanıcı sayıları.
+- **Endpoint Status özeti:** toplam agent ve 7 / 15 / 30+ gündür erişmeyen agent sayıları.
+- **Tablolar:** her bölümde arama kutusu vardır (Türkçe karakterlere duyarlı). Sütun başlığına tıklayınca sıralanır.
+- **Renkli gün etiketleri:** eşik ve üzeri kırmızı, 7 gün ve üzeri sarı, altı yeşil.
+- **Açık / koyu tema:** bilgisayarın tema ayarına göre otomatik seçilir. Telefonda ve yazdırırken de düzgün görünür.
+- Tüm veriler HTML'e güvenli şekilde (encode edilerek) yazılır.
+
+```powershell
+.\ForcepointAgentCoverageHtml.ps1
+```
+
+```powershell
+.\ForcepointAgentCoverageHtml.ps1 -OutputFolder "D:\Raporlar" -NoOpen
+```
+
+HTML scripti, yukarıdaki tüm parametrelere ek olarak şunları destekler:
+
+| Parametre | Varsayılan | Açıklama |
+|---|---|---|
+| `-OutputFolder` | masaüstü | CSV ve HTML raporun kaydedileceği klasör |
+| `-NoOpen` | kapalı | HTML raporu oluşturduktan sonra tarayıcıda açmaz (zamanlanmış görevler için) |
+
+İngilizce rapor için `ForcepointAgentCoverageHtml.en.ps1` kullanılabilir.
+
 ### Gereksinimler
 
 - Windows PowerShell 5.1+
@@ -90,7 +131,7 @@ Sorgu .NET `System.DirectoryServices` (LDAP) ile yapılır, RSAT / ActiveDirecto
 
 - Scripti içeriğini kopyala-yapıştır yaparak değil, **dosya olarak** (tercihen zip içinde) aktarın. Kopyalama sırasında dosyanın başına satır eklenirse `Unexpected attribute 'CmdletBinding'` hatası alınır.
 - Dosyalar **UTF-8 (BOM'lu)** kaydedilmiştir. Farklı bir kodlamayla kaydedilirse Türkçe karakterler bozuk görünür.
-- İnternetten indirilen dosya engellenirse: `Unblock-File .\ForcepointAgentCoverage.ps1`
+- İnternetten indirilen dosya engellenirse: `Unblock-File .\ForcepointAgentCoverage.ps1` (HTML scripti için `Unblock-File .\ForcepointAgentCoverageHtml.ps1`)
 
 ## Ekran görüntüleri
 
@@ -115,6 +156,14 @@ Sorgu .NET `System.DirectoryServices` (LDAP) ile yapılır, RSAT / ActiveDirecto
 ### 5. AD erişim hatası, farklı hesapla ve farklı OU ile tekrar deneme
 
 ![AD hata ve tekrar deneme](docs/images/tr/05-ad-hata-ve-tekrar-deneme.png)
+
+### 6. HTML rapor (açık tema, tam sayfa)
+
+![HTML rapor açık tema](docs/images/tr/06-html-rapor-acik-tema.png)
+
+### 7. HTML rapor (koyu tema)
+
+![HTML rapor koyu tema](docs/images/tr/07-html-rapor-koyu-tema.png)
 
 ---
 
