@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -22,6 +22,10 @@
            - Ayni makinede birden fazla kullanici oturumu olan makineler
            - AD'de bulunamayan Forcepoint kullanicilari
       5. Sonucu masaustune CSV olarak kaydeder.
+      6. Ayrica tek dosyalik, internet baglantisi gerektirmeyen bir HTML rapor olusturur ve tarayicida acar:
+         kapsam orani grafigi, ozet kartlari, aranabilir/siralanabilir tablolar, acik/koyu tema.
+
+    Bu script ForcepointAgentCoverage.ps1 ile ayni islemi yapar, ek olarak HTML rapor uretir.
 
     Kullanici filtresi: (&(objectCategory=person)(objectClass=user)(!(objectClass=computer))
                           (!(userAccountControl:1.2.840.113556.1.4.803:=2)))
@@ -30,13 +34,16 @@
     Hazirlayan: FIRAT AYDIN
 
 .EXAMPLE
-    .\ForcepointAgentCoverage.ps1
+    .\ForcepointAgentCoverageHtml.ps1
 
 .EXAMPLE
-    .\ForcepointAgentCoverage.ps1 -SqlServerInstance "SQL01" -SqlAuthMode SqlLogin -SqlUserName sa
+    .\ForcepointAgentCoverageHtml.ps1 -SqlServerInstance "SQL01" -SqlAuthMode SqlLogin -SqlUserName sa
 
 .EXAMPLE
-    .\ForcepointAgentCoverage.ps1 -AdServer DC01.firma.local -AdUseCredential -AdSearchBase "OU=Kullanicilar,DC=firma,DC=local"
+    .\ForcepointAgentCoverageHtml.ps1 -AdServer DC01.firma.local -AdUseCredential -AdSearchBase "OU=Kullanicilar,DC=firma,DC=local"
+
+.EXAMPLE
+    .\ForcepointAgentCoverageHtml.ps1 -OutputFolder "D:\Raporlar" -NoOpen
 #>
 
 [CmdletBinding()]
@@ -63,7 +70,13 @@ param(
 
     # Ajani olan kullanicilarda "uzun suredir gorulmuyor" esigi (gun)
     [ValidateRange(1, 3650)]
-    [int]$StaleDays = 30
+    [int]$StaleDays = 30,
+
+    # CSV ve HTML raporun kaydedilecegi klasor (bos = masaustu)
+    [string]$OutputFolder = '',
+
+    # HTML raporu olusturduktan sonra tarayicida acma
+    [switch]$NoOpen
 )
 
 Set-StrictMode -Version Latest
@@ -72,6 +85,8 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 
 $script:Thresholds = @(7, 15, 30)
 $script:SecurePassword = $null
+$script:ReportStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$script:OutDir = if ([string]::IsNullOrWhiteSpace($OutputFolder)) { [Environment]::GetFolderPath('Desktop') } else { $OutputFolder.Trim() }
 
 function Write-Section {
     param([string]$Title)
@@ -521,48 +536,301 @@ function Invoke-AdComparison {
     Write-Section -Title "AYNI MAKİNEDE BİRDEN FAZLA KULLANICI OTURUMU OLAN MAKİNELER ($($sharedEps.Count))"
     if ($sharedEps.Count -gt 0) {
         Write-Host 'Bu makinelerde tek Forcepoint ajanı birden fazla kullanıcıyı kapsıyor; bu kullanıcılar yukarıda ayrı ayrı "ajanı var" sayılır.' -ForegroundColor DarkGray
-        $sharedEps | Sort-Object @{ E = { $_.Names.Count }; Descending = $true }, @{ E = { $_.Endpoint.Hostname } } | ForEach-Object {
-            $labels = foreach ($n in $_.Names) {
-                if ($adByKey.ContainsKey($n)) {
-                    $dn = [string]$adByKey[$n].DisplayName
-                    if ($dn) { "$n ($dn)" } else { $n }
-                }
-                else { "$n (AD'de yok)" }
-            }
-            [pscustomobject]@{
-                Hostname                   = $_.Endpoint.Hostname
-                IP                         = $_.Endpoint.IpAddress
-                'Kullanıcı Sayısı'         = $_.Names.Count
-                'Oturum Açan Kullanıcılar' = ($labels -join ', ')
-                'Gün'                      = $_.Endpoint.DaysAgo
-            }
-        } | Format-Table -AutoSize | Out-Host
+    }
+    # Ortak makine satirlari (konsol tablosu ve HTML rapor icin)
+    $sharedRows = @($sharedEps | Sort-Object @{ E = { $_.Names.Count }; Descending = $true }, @{ E = { $_.Endpoint.Hostname } } | ForEach-Object {
+        $labelObjs = @(foreach ($n in $_.Names) {
+            $inAd = $adByKey.ContainsKey($n)
+            $dn = if ($inAd) { [string]$adByKey[$n].DisplayName } else { '' }
+            [pscustomobject]@{ Name = $n; DisplayName = $dn; InAd = $inAd }
+        })
+        $labels = foreach ($l in $labelObjs) { if (-not $l.InAd) { "$($l.Name) (AD'de yok)" } elseif ($l.DisplayName) { "$($l.Name) ($($l.DisplayName))" } else { $l.Name } }
+        [pscustomobject]@{
+            Hostname                   = $_.Endpoint.Hostname
+            IP                         = $_.Endpoint.IpAddress
+            'Kullanıcı Sayısı'         = $_.Names.Count
+            'Oturum Açan Kullanıcılar' = ($labels -join ', ')
+            'Gün'                      = $_.Endpoint.DaysAgo
+            Labels                     = $labelObjs
+        }
+    })
+    if ($sharedRows.Count -gt 0) {
+        $sharedRows | Format-Table Hostname, IP, 'Kullanıcı Sayısı', 'Oturum Açan Kullanıcılar', 'Gün' -AutoSize | Out-Host
     }
     else { Write-Host 'Birden fazla kullanıcının oturum açtığı makine yok.' -ForegroundColor Green }
 
     # Forcepoint'te olup AD'de karsiligi olmayan kullanicilar (yerel hesap, farkli domain vb.)
     $fpOnly = @($fpIndex.Keys | Where-Object { -not $adKeySet.Contains($_) } | Sort-Object)
+    $fpOnlyRows = @($fpOnly | ForEach-Object {
+        [pscustomobject]@{ 'FP Kullanıcı' = $_; 'Makine(ler)' = (@($fpIndex[$_] | ForEach-Object { $_.Hostname } | Sort-Object -Unique) -join ', ') }
+    })
     Write-Section -Title "AD'DE BULUNAMAYAN FORCEPOINT KULLANICILARI ($($fpOnly.Count))"
     if ($fpOnly.Count -gt 0) {
         Write-Host '(Yerel hesap, AD''de devre dışı, farklı domain veya OU dışında kalan kullanıcılar olabilir.)' -ForegroundColor DarkGray
-        $fpOnly | ForEach-Object {
-            [pscustomobject]@{ 'FP Kullanıcı' = $_; 'Makine(ler)' = (@($fpIndex[$_] | ForEach-Object { $_.Hostname } | Sort-Object -Unique) -join ', ') }
-        } | Format-Table -AutoSize | Out-Host
+        $fpOnlyRows | Format-Table -AutoSize | Out-Host
     }
     else { Write-Host 'Forcepoint kullanıcılarının tamamı AD''de bulundu.' -ForegroundColor Green }
 
-    $csv = Join-Path ([Environment]::GetFolderPath('Desktop')) ("Forcepoint_Ajan_Kapsam_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $csv = Join-Path $script:OutDir ("Forcepoint_Ajan_Kapsam_{0}.csv" -f $script:ReportStamp)
     $all | Sort-Object FpAjani, SamAccountName |
         Select-Object SamAccountName, DisplayName, Mail, FpAjani, FpMakineler, OrtakMakine, FpSonGorulmeGun, UzunSureGorulmuyor, AdLastLogon, UserPrincipalName, DistinguishedName |
         Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
     Write-Host ''
     Write-Host "Rapor CSV kaydedildi: $csv" -ForegroundColor Cyan
+
+    # HTML rapor icin sonuc verisi
+    return [pscustomobject]@{
+        All              = $all
+        Missing          = $missing
+        Matched          = $matched
+        Stale            = $stale
+        Shared           = $sharedRows
+        FpOnly           = $fpOnlyRows
+        NoUserEndpoints  = $noUserEndpoints
+        MatchedHostCount = $matchedHosts.Count
+    }
+}
+
+# Tek dosyalik HTML rapor olusturur (CSS/JS gomulu, dis kaynak yok). Tum veriler HTML-encode edilir.
+function New-CoverageHtml {
+    param([object]$Result, [hashtable]$EndpointSummary, [object]$Ad, [string]$Path)
+
+    function Enc($v) { if ($null -eq $v) { '' } else { [System.Net.WebUtility]::HtmlEncode([string]$v) } }
+    function New-DayCell($d) {
+        if ($null -eq $d -or [string]$d -eq '') { return '<td class="num" data-v="-1"><span class="muted">-</span></td>' }
+        $n = [int]$d
+        $cls = if ($n -ge $StaleDays) { 'bad' } elseif ($n -ge 7) { 'warn' } else { 'ok' }
+        return "<td class=""num"" data-v=""$n""><span class=""pill $cls"">$n</span></td>"
+    }
+    function New-HtmlTable([string]$Id, [string[]]$Headers, [object[]]$Rows, [string]$Empty) {
+        $Rows = @($Rows | Where-Object { $_ })
+        if ($Rows.Count -eq 0) { return "<p class=""empty"">$Empty</p>" }
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append("<div class=""tools""><input type=""search"" class=""filter"" data-target=""$Id"" data-unit=""kayıt"" placeholder=""Tabloda ara..."" aria-label=""Tabloda ara""><span class=""count"" id=""$Id-count"">$($Rows.Count) kayıt</span></div>")
+        [void]$sb.Append("<div class=""tablewrap""><table id=""$Id"" class=""sortable""><thead><tr>")
+        foreach ($h in $Headers) { [void]$sb.Append("<th>$h</th>") }
+        [void]$sb.Append('</tr></thead><tbody>')
+        foreach ($r in $Rows) { [void]$sb.Append([string]$r) }
+        [void]$sb.Append('</tbody></table></div>')
+        return $sb.ToString()
+    }
+
+    $tr = [Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $total = @($Result.All).Count
+    $mCount = @($Result.Matched).Count
+    $xCount = @($Result.Missing).Count
+    $sCount = @($Result.Stale).Count
+    $shCount = @($Result.Shared).Count
+    $foCount = @($Result.FpOnly).Count
+    $pct = if ($total -gt 0) { [math]::Round($mCount * 100.0 / $total, 1) } else { 0 }
+    $pctCss = $pct.ToString($inv)
+    $pctText = '%' + $pct.ToString('0.#', $tr)
+
+    $rowsMissing = foreach ($u in @($Result.Missing)) {
+        "<tr><td class=""mono"">$(Enc $u.SamAccountName)</td><td>$(Enc $u.DisplayName)</td><td>$(Enc $u.Mail)</td><td class=""mono"">$(Enc $u.AdLastLogon)</td></tr>"
+    }
+    $rowsMatched = foreach ($u in @($Result.Matched)) {
+        $sh = if ($u.OrtakMakine -eq 'Evet') { '<span class="tag info">Evet</span>' } else { '<span class="muted">Hayır</span>' }
+        "<tr><td class=""mono"">$(Enc $u.SamAccountName)</td><td>$(Enc $u.DisplayName)</td><td class=""mono"">$(Enc $u.FpMakineler)</td><td>$sh</td>$(New-DayCell $u.FpSonGorulmeGun)</tr>"
+    }
+    $rowsStale = foreach ($u in @($Result.Stale)) {
+        "<tr><td class=""mono"">$(Enc $u.SamAccountName)</td><td>$(Enc $u.DisplayName)</td><td class=""mono"">$(Enc $u.FpMakineler)</td>$(New-DayCell $u.FpSonGorulmeGun)<td class=""mono"">$(Enc $u.AdLastLogon)</td></tr>"
+    }
+    $rowsShared = foreach ($s in @($Result.Shared)) {
+        $chips = foreach ($l in @($s.Labels)) {
+            if (-not $l.InAd) { "<span class=""chip warn"">$(Enc $l.Name)<small>AD'de yok</small></span>" }
+            elseif ($l.DisplayName) { "<span class=""chip"">$(Enc $l.Name)<small>$(Enc $l.DisplayName)</small></span>" }
+            else { "<span class=""chip"">$(Enc $l.Name)</span>" }
+        }
+        "<tr><td class=""mono"">$(Enc $s.Hostname)</td><td class=""mono"">$(Enc $s.IP)</td><td class=""num"" data-v=""$($s.'Kullanıcı Sayısı')"">$($s.'Kullanıcı Sayısı')</td><td class=""wrap"">$($chips -join '')</td>$(New-DayCell $s.'Gün')</tr>"
+    }
+    $rowsFpOnly = foreach ($f in @($Result.FpOnly)) {
+        "<tr><td class=""mono"">$(Enc $f.'FP Kullanıcı')</td><td class=""mono"">$(Enc $f.'Makine(ler)')</td></tr>"
+    }
+
+    $css = @'
+:root{--bg:#f4f6f9;--surface:#fff;--surface2:#f0f2f6;--text:#1c2230;--muted:#667085;--border:#e2e6ec;--ok:#15803d;--ok-bg:#e3f5ea;--warn:#a16207;--warn-bg:#fef3c7;--bad:#b91c1c;--bad-bg:#fde8e8;--info:#1d4ed8;--info-bg:#e6edff;--head:#0f2747;--head-text:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1117;--surface:#161a22;--surface2:#1d222c;--text:#e6e9ef;--muted:#9aa3b2;--border:#2a303b;--ok:#4ade80;--ok-bg:#11301e;--warn:#fbbf24;--warn-bg:#3a2b08;--bad:#f87171;--bad-bg:#3b1515;--info:#93b4ff;--info-bg:#18264a;--head:#111c30;--head-text:#e6e9ef}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI",system-ui,-apple-system,Arial,sans-serif}
+.hero{background:var(--head);color:var(--head-text);padding:26px 0 70px}
+.wrap{max-width:1200px;margin:0 auto;padding:0 20px}
+.hero h1{margin:0 0 4px;font-size:24px;font-weight:650}
+.hero p{margin:0;opacity:.8}
+.hero .top{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:14px}
+.ro{font-size:12px;padding:4px 12px;border-radius:999px;background:rgba(255,255,255,.14);font-weight:600;white-space:nowrap}
+.main{margin-top:-50px;padding-bottom:40px}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 22px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 18px;margin-bottom:16px;box-shadow:0 4px 14px rgba(15,39,71,.08)}
+.meta span{display:block;font-size:12px;color:var(--muted)}
+.meta b{font-weight:600;word-break:break-word}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px}
+.card .label{font-size:12.5px;color:var(--muted);margin-bottom:6px}
+.card .value{font-size:30px;font-weight:700;line-height:1.1}
+.card .hint{font-size:12.5px;color:var(--muted);margin-top:6px}
+.card.bad{border-top:4px solid var(--bad)}.card.bad .value{color:var(--bad)}
+.card.warn{border-top:4px solid var(--warn)}.card.warn .value{color:var(--warn)}
+.card.ok{border-top:4px solid var(--ok)}.card.ok .value{color:var(--ok)}
+.card.big{grid-column:span 2;display:flex;align-items:center;gap:22px}
+.donut{width:122px;height:122px;border-radius:50%;display:grid;place-items:center;flex:none}
+.donut::after{content:"";grid-area:1/1;width:88px;height:88px;border-radius:50%;background:var(--surface)}
+.donut b{grid-area:1/1;position:relative;z-index:1;font-size:21px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.strip{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 14px;font-size:13px;color:var(--muted)}
+.stat b{color:var(--text);font-size:15px;margin-left:6px}
+.note{background:var(--info-bg);border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
+nav.toc{display:flex;flex-wrap:wrap;gap:8px;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;margin-bottom:6px}
+nav.toc a{text-decoration:none;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:5px 12px;font-size:13px}
+nav.toc a:hover{border-color:var(--info)}
+nav.toc a b{margin-left:6px;color:var(--muted)}
+section{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px;margin-bottom:16px;scroll-margin-top:60px}
+section h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+section .desc{color:var(--muted);margin:0 0 12px;font-size:13px}
+.cnt{font-size:12px;padding:1px 9px;border-radius:999px;background:var(--surface2);color:var(--muted);font-weight:600}
+.cnt.bad{background:var(--bad-bg);color:var(--bad)}.cnt.warn{background:var(--warn-bg);color:var(--warn)}.cnt.ok{background:var(--ok-bg);color:var(--ok)}
+.tools{display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+input.filter{flex:1;min-width:180px;max-width:340px;padding:7px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font:inherit}
+.count{color:var(--muted);font-size:12.5px}
+.tablewrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;vertical-align:middle}
+td.wrap{white-space:normal;min-width:260px}
+th{background:var(--surface2);font-weight:600;cursor:pointer;user-select:none}
+th::after{content:" \2195";color:var(--muted);font-size:11px}
+th.asc::after{content:" \2191"}th.desc::after{content:" \2193"}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--surface2)}
+.num{text-align:right}
+.mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:12.5px}
+.muted{color:var(--muted)}
+.pill{display:inline-block;min-width:36px;text-align:center;padding:1px 8px;border-radius:999px;font-weight:600;font-size:12px}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.warn{background:var(--warn-bg);color:var(--warn)}.pill.bad{background:var(--bad-bg);color:var(--bad)}
+.tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:12px;font-weight:600}
+.tag.info{background:var(--info-bg);color:var(--info)}
+.chip{display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);font-size:12.5px}
+.chip small{color:var(--muted);margin-left:5px}
+.chip.warn{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
+.chip.warn small{color:var(--warn)}
+.empty{color:var(--ok);margin:4px 0;font-weight:600}
+footer{color:var(--muted);font-size:12px;text-align:center;margin-top:20px}
+@media (max-width:600px){.card.big{grid-column:auto;flex-direction:column;align-items:flex-start}.hero h1{font-size:20px}}
+@media print{nav.toc,.tools{display:none}body{background:#fff}.hero{padding-bottom:20px}.main{margin-top:10px}section,.card,.meta{break-inside:avoid;box-shadow:none}}
+'@
+
+    $js = @'
+(function(){
+  var lang=document.documentElement.lang||'tr';
+  document.querySelectorAll('input.filter').forEach(function(inp){
+    inp.addEventListener('input',function(){
+      var t=document.getElementById(inp.getAttribute('data-target'));if(!t)return;
+      var q=inp.value.toLocaleLowerCase(lang).trim(),rows=t.tBodies[0].rows,n=0;
+      for(var i=0;i<rows.length;i++){var ok=rows[i].textContent.toLocaleLowerCase(lang).indexOf(q)>-1;rows[i].style.display=ok?'':'none';if(ok)n++;}
+      var c=document.getElementById(t.id+'-count');if(c)c.textContent=(q?n+' / ':'')+rows.length+' '+inp.getAttribute('data-unit');
+    });
+  });
+  document.querySelectorAll('table.sortable').forEach(function(t){
+    var ths=t.tHead.rows[0].cells;
+    for(var k=0;k<ths.length;k++){(function(th,idx){
+      th.addEventListener('click',function(){
+        var asc=!th.classList.contains('asc');
+        for(var j=0;j<ths.length;j++){ths[j].classList.remove('asc','desc');}
+        th.classList.add(asc?'asc':'desc');
+        var body=t.tBodies[0],rows=Array.prototype.slice.call(body.rows);
+        var val=function(r){var c=r.cells[idx];if(!c)return '';var v=c.getAttribute('data-v');return v!==null?v:c.textContent.trim();};
+        rows.sort(function(a,b){var x=val(a),y=val(b),nx=parseFloat(x),ny=parseFloat(y);
+          var r=(/^-?\d+(\.\d+)?$/.test(x)&&/^-?\d+(\.\d+)?$/.test(y))?nx-ny:x.localeCompare(y,lang,{numeric:true,sensitivity:'base'});
+          return asc?r:-r;});
+        rows.forEach(function(r){body.appendChild(r);});
+      });
+    })(ths[k],k);}
+  });
+})();
+'@
+
+    $genAt = Get-Date -Format 'yyyy-MM-dd HH:mm'
+    $dc = if ($Ad.DcName) { $Ad.DcName } else { '(otomatik)' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('<!DOCTYPE html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">')
+    [void]$sb.Append('<title>Forcepoint DLP Ajan Kapsam Raporu</title><style>' + $css + '</style></head><body>')
+    [void]$sb.Append('<div class="hero"><div class="wrap"><div class="top"><div><h1>Forcepoint DLP &middot; Ajan Kapsam Raporu</h1>')
+    [void]$sb.Append('<p>Active Directory aktif kullanıcıları ile Forcepoint Endpoint Status karşılaştırması</p></div>')
+    [void]$sb.Append('<span class="ro">Yalnızca okuma &middot; hiçbir kayıt değiştirilmedi</span></div></div></div>')
+    [void]$sb.Append('<div class="wrap main">')
+
+    # Rapor bilgileri
+    [void]$sb.Append('<div class="meta">')
+    foreach ($m in @(
+            @('Oluşturulma', $genAt), @('SQL Server / Veritabanı', "$SqlServerInstance / $SqlDatabaseName"),
+            @('Domain Controller', $dc), @('Arama kökü (OU)', $Ad.SearchBase),
+            @('"Uzun süredir görülmüyor" eşiği', "$StaleDays gün"), @('Çalıştıran', "$env:USERDOMAIN\$env:USERNAME @ $env:COMPUTERNAME"))) {
+        [void]$sb.Append("<div><span>$(Enc $m[0])</span><b>$(Enc $m[1])</b></div>")
+    }
+    [void]$sb.Append('</div>')
+
+    # Ozet kartlari
+    $donutBg = "background:conic-gradient(var(--ok) 0 $pctCss%, var(--bad) $pctCss% 100%)"
+    if ($total -eq 0) { $donutBg = 'background:var(--surface2)' }
+    [void]$sb.Append('<div class="kpis">')
+    [void]$sb.Append("<div class=""card big""><div class=""donut"" style=""$donutBg""><b>$pctText</b></div><div><div class=""label"">Ajan kapsamı</div><div class=""value"">$mCount / $total</div><div class=""hint"">aktif AD kullanıcısında Forcepoint ajanı görünüyor</div><div class=""legend""><span><i style=""background:var(--ok)""></i>Ajanı olan</span><span><i style=""background:var(--bad)""></i>Ajanı olmayan</span></div></div></div>")
+    [void]$sb.Append("<div class=""card bad""><div class=""label"">Ajanı olmayan</div><div class=""value"">$xCount</div><div class=""hint"">aktif AD kullanıcısı</div></div>")
+    [void]$sb.Append("<div class=""card ok""><div class=""label"">Ajanı olan</div><div class=""value"">$mCount</div><div class=""hint"">$($Result.MatchedHostCount) farklı makinede</div></div>")
+    [void]$sb.Append("<div class=""card warn""><div class=""label"">Ajanı var, $StaleDays+ gün görülmüyor</div><div class=""value"">$sCount</div><div class=""hint"">ajan fiilen çalışmıyor olabilir</div></div>")
+    [void]$sb.Append("<div class=""card""><div class=""label"">Ortak makine</div><div class=""value"">$shCount</div><div class=""hint"">birden fazla kullanıcı oturumu</div></div>")
+    [void]$sb.Append("<div class=""card""><div class=""label"">AD'de bulunamayan</div><div class=""value"">$foCount</div><div class=""hint"">Forcepoint kullanıcısı</div></div>")
+    [void]$sb.Append('</div>')
+
+    # Endpoint Status ozeti
+    [void]$sb.Append('<div class="strip">')
+    [void]$sb.Append("<div class=""stat"">Endpoint Status toplam agent<b>$($EndpointSummary['Total'])</b></div>")
+    foreach ($t in $script:Thresholds) { [void]$sb.Append("<div class=""stat"">$t+ gün erişmeyen agent<b>$($EndpointSummary["Stale$t"])</b></div>") }
+    [void]$sb.Append("<div class=""stat"">Kullanıcı bilgisi boş endpoint<b>$($Result.NoUserEndpoints)</b></div>")
+    [void]$sb.Append('</div>')
+    [void]$sb.Append('<div class="note"><b>Not:</b> Eşleşme Endpoint Status &quot;Logged-in Users&quot; alanına göre yapılır. Ajan kurulu olduğu halde o an oturum açmamış kullanıcılar &quot;ajanı olmayan&quot; görünebilir.</div>')
+
+    # Bolum menusu
+    [void]$sb.Append('<nav class="toc">')
+    foreach ($n in @(@('s-missing', 'Ajanı olmayan', $xCount), @('s-matched', 'Ajanı olan', $mCount), @('s-stale', "$StaleDays+ gün görülmeyen", $sCount), @('s-shared', 'Ortak makineler', $shCount), @('s-fponly', "AD'de bulunamayan", $foCount))) {
+        [void]$sb.Append("<a href=""#$($n[0])"">$(Enc $n[1])<b>$($n[2])</b></a>")
+    }
+    [void]$sb.Append('</nav>')
+
+    # Bolumler
+    $sections = @(
+        @{ Id = 's-missing'; Title = 'Forcepoint ajanı olmayan aktif AD kullanıcıları'; Count = $xCount; Cls = $(if ($xCount -gt 0) { 'bad' } else { 'ok' })
+           Desc = 'Bu kullanıcılar AD''de aktif, ancak Forcepoint Endpoint Status listesinde hiçbir makinede görünmüyor.'
+           Html = (New-HtmlTable 't-missing' @('Kullanıcı', 'Ad Soyad', 'E-posta', 'AD son oturum') $rowsMissing 'Tüm aktif AD kullanıcıları Forcepoint Endpoint Status listesinde eşleşti.') },
+        @{ Id = 's-matched'; Title = 'Forcepoint ajanı olan aktif AD kullanıcıları'; Count = $mCount; Cls = 'ok'
+           Desc = 'FP son görülme: kullanıcının makine(ler)inin Forcepoint''e en son bağlandığı günden bu yana geçen gün.'
+           Html = (New-HtmlTable 't-matched' @('Kullanıcı', 'Ad Soyad', 'FP makine(ler)', 'Ortak makine', 'FP son görülme (gün)') $rowsMatched 'Eşleşen kullanıcı yok.') },
+        @{ Id = 's-stale'; Title = "Ajanı olan ama $StaleDays+ gündür görülmeyen kullanıcılar"; Count = $sCount; Cls = $(if ($sCount -gt 0) { 'warn' } else { 'ok' })
+           Desc = 'Bu kullanıcıların makinesi uzun süredir Forcepoint''e bağlanmıyor; ajan kaldırılmış, bozuk veya makine kullanılmıyor olabilir.'
+           Html = (New-HtmlTable 't-stale' @('Kullanıcı', 'Ad Soyad', 'FP makine(ler)', 'FP son görülme (gün)', 'AD son oturum') $rowsStale "Ajanı olan tüm kullanıcıların makinesi son $StaleDays gün içinde Forcepoint'e bağlanmış.") },
+        @{ Id = 's-shared'; Title = 'Aynı makinede birden fazla kullanıcı oturumu olan makineler'; Count = $shCount; Cls = ''
+           Desc = 'Bu makinelerde tek Forcepoint ajanı birden fazla kullanıcıyı kapsıyor; bu kullanıcılar ayrı ayrı "ajanı var" sayılır.'
+           Html = (New-HtmlTable 't-shared' @('Hostname', 'IP', 'Kullanıcı sayısı', 'Oturum açan kullanıcılar', 'Gün') $rowsShared 'Birden fazla kullanıcının oturum açtığı makine yok.') },
+        @{ Id = 's-fponly'; Title = 'AD''de bulunamayan Forcepoint kullanıcıları'; Count = $foCount; Cls = ''
+           Desc = 'Yerel hesap, AD''de devre dışı hesap, farklı domain veya girilen OU''nun dışında kalan kullanıcılar olabilir.'
+           Html = (New-HtmlTable 't-fponly' @('FP kullanıcı', 'Makine(ler)') $rowsFpOnly 'Forcepoint kullanıcılarının tamamı AD''de bulundu.') }
+    )
+    foreach ($s in $sections) {
+        [void]$sb.Append("<section id=""$($s.Id)""><h2>$(Enc $s.Title)<span class=""cnt $($s.Cls)"">$($s.Count)</span></h2><p class=""desc"">$(Enc $s.Desc)</p>$($s.Html)</section>")
+    }
+
+    [void]$sb.Append('<footer>ForcepointAgentCoverageHtml.ps1 ile oluşturuldu &middot; Hazırlayan: FIRAT AYDIN</footer>')
+    [void]$sb.Append('</div><script>' + $js + '</script></body></html>')
+
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::WriteAllText($Path, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # ------------------------------------------------------------------------------------
 # 1) SQL baglantisi
 # ------------------------------------------------------------------------------------
-Write-Section -Title 'FORCEPOINT DLP - AJAN KAPSAM RAPORU (yalnızca okuma)'
+Write-Section -Title 'FORCEPOINT DLP - AJAN KAPSAM RAPORU + HTML (yalnızca okuma)'
 
 if ([string]::IsNullOrWhiteSpace($SqlServerInstance)) {
     $SqlServerInstance = Read-Host -Prompt 'SQL Server adı (örnek: SUNUCUADI veya SUNUCUADI\INSTANCE)'
@@ -593,8 +861,10 @@ Write-Host "SQL Server bağlantısı: BAŞARILI ($SqlServerInstance / $SqlDataba
 # ------------------------------------------------------------------------------------
 Write-Section -Title 'AGENT ÖZETİ'
 Write-Host ("Endpoint Status'taki toplam agent sayısı : {0}" -f @($endpoints).Count) -ForegroundColor White
+$epSummary = @{ Total = @($endpoints).Count }
 foreach ($t in $script:Thresholds) {
     $cnt = @($endpoints | Where-Object { $null -ne $_.DaysAgo -and $_.DaysAgo -ge $t }).Count
+    $epSummary["Stale$t"] = $cnt
     $c = if ($cnt -gt 0) { 'Yellow' } else { 'Green' }
     Write-Host ("{0,2} gün ve üzeri erişmeyen agent          : {1}" -f $t, $cnt) -ForegroundColor $c
 }
@@ -620,6 +890,21 @@ $dcText = if ($ad.DcName) { $ad.DcName } else { '(otomatik)' }
 Write-Host "AD bağlantısı: BAŞARILI (DC: $dcText)" -ForegroundColor Green
 Write-Host "Arama kökü   : $($ad.SearchBase)" -ForegroundColor DarkGray
 
-Invoke-AdComparison -Endpoints $endpoints -Ad $ad
+$result = Invoke-AdComparison -Endpoints $endpoints -Ad $ad
+
+# ------------------------------------------------------------------------------------
+# 4) HTML rapor
+# ------------------------------------------------------------------------------------
+$htmlPath = Join-Path $script:OutDir ("Forcepoint_Ajan_Kapsam_{0}.html" -f $script:ReportStamp)
+try {
+    New-CoverageHtml -Result $result -EndpointSummary $epSummary -Ad $ad -Path $htmlPath
+    Write-Host "HTML rapor kaydedildi: $htmlPath" -ForegroundColor Cyan
+    if (-not $NoOpen) {
+        try { Start-Process -FilePath $htmlPath } catch { Write-Host 'HTML rapor otomatik açılamadı; dosyayı tarayıcıda elle açın.' -ForegroundColor DarkYellow }
+    }
+}
+catch {
+    Write-Host "HTML rapor oluşturulamadı: $($_.Exception.Message)" -ForegroundColor Red
+}
 
 Write-Host 'Rapor tamamlandı. SQL ve AD üzerinde hiçbir kayıt silinmedi veya değiştirilmedi.' -ForegroundColor Green
